@@ -1,3 +1,4 @@
+#include <stdarg.h>
 #include <ArduinoJson.h>
 #include <LiquidCrystal_I2C.h>
 #include <WiFiClientSecure.h>
@@ -139,6 +140,37 @@ restart:
     int responseCode = http.POST(OAUTH_INIT_ENDPOINT_BODY);
     /////////////////////////////////////
     Serial.print("[INIT Google Auth Handshake] HTTP Response code = ");
+
+    if (WiFi.status() != WL_CONNECTED) {
+      lcd.setCursor(0, 0);
+      lcd.print("Lost signal");
+      lcd.setCursor(0, 1);
+      lcd.print("Reconnecting...");
+      delay(2000);
+
+      Serial.print("[INIT Google Auth Handshake] Lost signal, restarting polling...");
+
+      connect_to_wifi();
+
+      Serial.print("[INIT Google Auth Handshake] Back online, restarting polling...");
+
+      goto restart;
+    } else if (responseCode < 0) {
+      Serial.printf("[HTTPS] GET... failed, error: %s. WILL RETRY\n", http.errorToString(responseCode).c_str());
+
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print(F("Auth failed #"));
+      lcd.print(responseCode);
+
+      lcd.setCursor(0, 1);
+      lcd.print(F("Retrying..."));
+
+      http.end();
+
+      goto restart;
+    }
+
     Serial.println(responseCode);
     if (responseCode != 200 && responseCode != 301) {
       Serial.printf("[HTTPS] GET... failed, error: %s\n", http.errorToString(responseCode).c_str());
@@ -223,7 +255,7 @@ restart:
 
     char body[512];
 
-    snprintf(body, sizeof(body), "grant_type=refresh_token&client_id=" CLIENT_ID "&client_secret=" CLIENT_SECRET "&refresh_token=%s", refresh_token);
+    bool copied_all = checked_snprintf(body, sizeof(body), "grant_type=refresh_token&client_id=" CLIENT_ID "&client_secret=" CLIENT_SECRET "&refresh_token=%s", refresh_token);
 
     int responseCode = http.POST(body);
 
@@ -240,7 +272,64 @@ restart:
   }
 }
 
-void oauth_poll(const char *device_code, const char *user_code, int expires, const char *verify_url) {
+// https://developers.google.com/identity/protocols/oauth2#:~:text=Tokens%20can%20vary%20in%20size,Refresh%20tokens%3A%20512%20bytes
+#define MAX_ACCESS_TOKEN_LEN 2050  // 2048 per docs, + 2 for null byte and rounding
+#define MAX_REFRESH_TOKEN_LEN 520  // 512 per docs, + 8 for null byte and rounding
+
+
+
+// struct AuthResponse : public Printable {
+//   char access_token[MAX_ACCESS_TOKEN_LEN];
+//   char refresh_token[MAX_REFRESH_TOKEN_LEN];
+//   unsigned long init_seconds;
+//   unsigned long expiration_seconds;
+
+//   inline unsigned long willExpireAt() const {
+//     return this->init_seconds + this->expiration_seconds;
+//   }
+
+//   inline unsigned long timeToExpiration() const {
+//     unsigned long seconds_now = millis() / 1000;
+//     return this->willExpireAt() - seconds_now;
+//   }
+
+//   size_t printTo(Print& p) const override {
+//     size_t result = 0;
+//     result += p.print("AuthResponse {\n\taccess_token: ");
+//     result += p.print(this->access_token);
+//     result += p.print(",\n\trefresh_token: ");
+//     result += p.print(this->refresh_token);
+//     result += p.print(",\n\ttime_to_expiration: ");
+//     result += p.print(this->timeToExpiration());
+//     result += p.print("\n}");
+//     return result;
+//   }
+// };
+
+bool checked_snprintf(char *str, size_t size, const char *format, ...) {
+  va_list args;
+  va_start(args, format);
+  vsnprintf(str, size, format, args);
+  va_end(args);
+
+  Serial.printf("[Checked snPrintF] last byte = %d\n", static_cast<int>(str[size - 1]));
+
+  return str[size - 1] == 0;
+}
+
+void oauth_poll(
+  const char *device_code, 
+  const char *user_code, 
+  int expires, 
+  const char *verify_url, 
+  char access_token_dst[MAX_ACCESS_TOKEN_LEN], 
+  char refresh_token_dst[MAX_REFRESH_TOKEN_LEN], 
+  unsigned long *expires_in_dst
+) {
+  unsigned long secondsAtStart = millis() / 1000;
+  unsigned long secondsWillExpire = secondsAtStart + expires;
+
+restart:
   Serial.printf("[Google Auth Handshake Verify] Displaying code \"%s\"\n", user_code);
   lcd.clear();
 
@@ -250,10 +339,6 @@ void oauth_poll(const char *device_code, const char *user_code, int expires, con
   lcd.print(user_code);
 
   char *connection_url;
-
-  unsigned long seconds_start = millis() / 1000;
-
-  unsigned long seconds_expires = seconds_start + expires;
 
   if (strcmp(verify_url, "https://www.google.com/device") == 0) {
     connection_url = "bit.ly/dev-conn";
@@ -278,9 +363,10 @@ void oauth_poll(const char *device_code, const char *user_code, int expires, con
   client.setCACert(CA_CERT_GOOGLE_AUTH_SERVER);
 
   while (1) {
-    unsigned long seconds_now = millis() / 1000;
+    unsigned long secondsNow = millis() / 1000;
+    unsigned long timeLeft = secondsWillExpire - secondsNow;
 
-    if (seconds_now > seconds_expires) {
+    if (timeLeft <= 0) {
       lcd.clear();
       lcd.home();
       lcd.print("Code expired!");
@@ -318,16 +404,58 @@ void oauth_poll(const char *device_code, const char *user_code, int expires, con
     //application/x-www-form-urlencoded
     http.addHeader("Content-Type", "application/x-www-form-urlencoded");
 
-    char body[512];
+    // TODO: I don't like the dependence on the heap--try looking at other options (snprintf, etc. for templating).
+    // There's only one string + string concatenation, so maybe a simple strcpy/memcpy could suffice?  
+    String body = String("grant_type=urn:ietf:params:oauth:grant-type:device_code&client_id=" CLIENT_ID "&client_secret=" CLIENT_SECRET "&device_code=") + device_code;
 
-    snprintf(body, sizeof(body), "grant_type=urn:ietf:params:oauth:grant-type:device_code&client_id=" CLIENT_ID "&client_secret=" CLIENT_SECRET "&device_code=%s", device_code);
+    // memset(body, 0, sizeof(body));
+
+    // bool copied_all = checked_snprintf(body, sizeof(body), , device_code);
+
+    // size_t body_len = strlen(body);
+
+    // Serial.print("Body len = "); Serial.println(body_len);
+
+    // if (!copied_all) {
+    //   body[sizeof(body) - 1] = 0;
+
+    //   lcd.home();
+    //   lcd.clear();
+    //   lcd.print("API Changed");
+    //   lcd.setCursor(0, 1);
+    //   lcd.print("BUF_OVFLW >");
+    //   lcd.print(sizeof(body));
+
+    //   Serial.print("ERR STRING TOO BIG: ");
+    //   Serial.print(body);
+      
+    //   while (1) {}
+    // }
+
+    // Serial.printf("%d\n", body[body_len]);
 
     int responseCode = http.POST(body);
 
     Serial.print("[Google Auth Handshake Verify] Response code = ");
 
+    if (responseCode < 0 && WiFi.status() != WL_CONNECTED) {
+      lcd.setCursor(0, 0);
+      lcd.print("Lost signal");
+      lcd.setCursor(0, 1);
+      lcd.print("Reconnecting...");
+      delay(2000);
+
+      Serial.print("[Google Auth Handshake Verify] Lost signal, restarting polling...");
+
+      connect_to_wifi();
+
+      Serial.print("[Google Auth Handshake Verify] Back online, restarting polling...");
+
+      goto restart;
+    }
+
     if (responseCode == 428) {
-      Serial.println("428 (User has not visited the link)");
+      Serial.printf("428 (User has not visited the link, %u seconds remaining)\n", timeLeft);
       delay(5000);
       continue;
     } else {
@@ -384,8 +512,14 @@ void oauth_poll(const char *device_code, const char *user_code, int expires, con
     Serial.println(scope);
     Serial.print("[Google Auth Handshake Verify] Token Type = ");
     Serial.println(token_type);
-    Serial.print("[Google Auth Handshake Verify] ID token = ");
+    Serial.print("[Google Auth Handshake Verify] ID token (use <https://jwt.io> to decode) = ");
     Serial.println(id_token);
+
+    Serial.flush();
+
+    strncpy(access_token_dst, access_token, MAX_ACCESS_TOKEN_LEN);
+    strncpy(refresh_token_dst, refresh_token, MAX_REFRESH_TOKEN_LEN);
+    *expires_in_dst = static_cast<unsigned long>(expires_in);
 
     lcd.clear();
     lcd.home();
@@ -407,15 +541,14 @@ void setup() {
   lcd.createChar(7, customBackslash);
 
   Serial.begin(9600);
-  
+
   Serial.println(F(
     "\n\nInit debug port\n\n"
     "  ___ ___ ___ _______    ___      _             _          \n"
-    " | __/ __| _ \__ /_  )  / __|__ _| |___ _ _  __| |__ _ _ _ \n"
-    " | _|\__ \  _/|_ \/ /  | (__/ _` | / -_) ' \/ _` / _` | '_|\n"
-    " |___|___/_| |___/___|  \___\__,_|_\___|_||_\__,_\__,_|_|  \n"
-    "\nMade by Mateo Rodriguez in 2023\n\n"                                                       
-    ));
+    " | __/ __| _ \\__ /_  )  / __|__ _| |___ _ _  __| |__ _ _ _ \n"
+    " | _|\\__ \\  _/|_ \\/ /  | (__/ _` | / -_) ' \\/ _` / _` | '_|\n"
+    " |___|___/_| |___/___|  \\___\\__,_|_\\___|_||_\\__,_\\__,_|_|  \n"
+    "\nMade by Mateo Rodriguez in 2023\n\n"));
 
   lcd.backlight();
 
@@ -445,8 +578,22 @@ void setup() {
 
   Serial.println("[Setup] Starting Auth Flow with Google Servers");
   oauth_login(device_code, user_code, &expires_in, verify_url);
+
+  // AuthResponse auth_response = AuthResponse();
+
   Serial.println("[Setup] Confirming Auth Flow with Google Servers");
-  oauth_poll(device_code, user_code, expires_in, verify_url);
+
+  char access_token[MAX_ACCESS_TOKEN_LEN];
+  char refresh_token[MAX_REFRESH_TOKEN_LEN];
+  unsigned long auth_token_expires_in = 0;
+
+  oauth_poll(device_code, user_code, expires_in, verify_url, access_token, refresh_token, &auth_token_expires_in);
+
+  // Serial.print(auth_response);
+  Serial.print("[Setup] access token is "); Serial.println(access_token);
+  Serial.print("[Setup] refresh token is "); Serial.println(refresh_token);
+  Serial.print("[Setup] expires in "); Serial.print(auth_token_expires_in); Serial.println(" seconds.");
+
 
   while (1) {}
 
