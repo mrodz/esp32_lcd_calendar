@@ -68,7 +68,11 @@ void connect_to_wifi() {
     lcd.print("              ");
     lcd.setCursor(2, 1);
     wifi_status = WiFi.status();
-    lcd.print(wifi_status_to_string(wifi_status));
+
+    auto wifi_string = wifi_status_to_string(wifi_status);
+
+    lcd.print(wifi_string);
+    Serial.printf("[Wifi Status] %s\n", wifi_string);
 
     delay(200);
   } while (wifi_status != WL_CONNECTED);
@@ -126,7 +130,7 @@ restart:
 
     // Your Domain name with URL path or IP address with path
     auto begin_code = http.begin(client, GOOGLE_AUTH_SERVER);
-    Serial.print("Begin code = ");
+    Serial.print("[INIT Google Auth Handshake] Begin code = ");
     Serial.println(begin_code);
 
     //application/x-www-form-urlencoded
@@ -134,10 +138,12 @@ restart:
 
     int responseCode = http.POST(OAUTH_INIT_ENDPOINT_BODY);
     /////////////////////////////////////
-    Serial.print("Response code = ");
+    Serial.print("[INIT Google Auth Handshake] HTTP Response code = ");
     Serial.println(responseCode);
     if (responseCode != 200 && responseCode != 301) {
       Serial.printf("[HTTPS] GET... failed, error: %s\n", http.errorToString(responseCode).c_str());
+
+      Serial.print(http.getString());
 
       lcd.clear();
       lcd.setCursor(0, 0);
@@ -147,7 +153,7 @@ restart:
       lcd.setCursor(0, 1);
       lcd.print(F("See serial port"));
 
-      Serial.println(F("This error renders the Calendar API inaccessible. Try updating the auth certificate."));
+      Serial.println(F("[INIT Google Auth Handshake] This error renders the Calendar API inaccessible. Try updating the auth certificate."));
 
       http.end();
 
@@ -158,7 +164,7 @@ restart:
 
     String raw_json = http.getString();
 
-    Serial.print("Auth Response = ");
+    Serial.print("[INIT Google Auth Handshake] Auth Response (JSON) = ");
     Serial.println(raw_json);
 
     DynamicJsonDocument doc(2048);
@@ -170,13 +176,13 @@ restart:
     int expires_in = doc["expires_in"];
     const char *verify_url = doc["verification_url"];
 
-    Serial.print("Device code = ");
+    Serial.print("[INIT Google Auth Handshake] Result:\n[INIT Google Auth Handshake] Device code = ");
     Serial.println(device_code);
-    Serial.print("User code = ");
+    Serial.print("[INIT Google Auth Handshake] User code = ");
     Serial.println(user_code);
-    Serial.print("Expires in = ");
+    Serial.print("[INIT Google Auth Handshake] Expires in = ");
     Serial.println(expires_in);
-    Serial.print("Url = ");
+    Serial.print("[INIT Google Auth Handshake] URL = ");
     Serial.println(verify_url);
 
     strcpy(device_code_dst, device_code);
@@ -186,7 +192,7 @@ restart:
 
     http.end();
   } else {
-    Serial.println("Disconnected");
+    Serial.println("[INIT Google Auth Handshake] Disconnected");
 
     connect_to_wifi();
 
@@ -209,7 +215,7 @@ restart:
     // Your Domain name with URL path or IP address with path
     int begin_code = http.begin(client, GOOGLE_POLL_SERVER);
 
-    Serial.print("Begin code = ");
+    Serial.print("[@@] Begin code = ");
     Serial.println(begin_code);
 
     //application/x-www-form-urlencoded
@@ -235,6 +241,7 @@ restart:
 }
 
 void oauth_poll(const char *device_code, const char *user_code, int expires, const char *verify_url) {
+  Serial.printf("[Google Auth Handshake Verify] Displaying code \"%s\"\n", user_code);
   lcd.clear();
 
   int leftSpacing = (16 - strlen(user_code)) / 2;
@@ -252,6 +259,7 @@ void oauth_poll(const char *device_code, const char *user_code, int expires, con
     connection_url = "bit.ly/dev-conn";
   } else {
     connection_url = "[!] Check Serial";
+    Serial.printf("[Google Auth Handshake Verify] While Google's endpoint usually returns <https://www.google.com/device> for authentication, you must verify at <%s>. You're special!\n", verify_url);
   }
 
   // max message len = 12
@@ -279,6 +287,8 @@ void oauth_poll(const char *device_code, const char *user_code, int expires, con
       lcd.setCursor(0, 1);
       lcd.print("Reset to retry");
 
+      Serial.println("[Google Auth Handshake Verify] Timeout! Please reset the device to get a new code.");
+
       // hang
       while (1) {}
     }
@@ -302,7 +312,7 @@ void oauth_poll(const char *device_code, const char *user_code, int expires, con
 
     // Your Domain name with URL path or IP address with path
     auto begin_code = http.begin(client, GOOGLE_POLL_SERVER);
-    Serial.print("Begin code = ");
+    Serial.print("[Google Auth Handshake Verify] HTTP Begin code = ");
     Serial.println(begin_code);
 
     //application/x-www-form-urlencoded
@@ -314,13 +324,14 @@ void oauth_poll(const char *device_code, const char *user_code, int expires, con
 
     int responseCode = http.POST(body);
 
-    Serial.print("Response code = ");
-    Serial.println(responseCode);
+    Serial.print("[Google Auth Handshake Verify] Response code = ");
 
     if (responseCode == 428) {
-      Serial.println("User has not visited the link");
+      Serial.println("428 (User has not visited the link)");
       delay(5000);
       continue;
+    } else {
+      Serial.println(responseCode);
     }
 
     if (responseCode != 200 && responseCode != 301) {
@@ -338,7 +349,7 @@ void oauth_poll(const char *device_code, const char *user_code, int expires, con
       lcd.setCursor(0, 1);
       lcd.print(F("See serial port"));
 
-      Serial.println(F("This error renders the Calendar API inaccessible. Try updating the auth certificate."));
+      Serial.println(F("[Google Auth Handshake Verify] This error renders the Calendar API inaccessible. Try updating the auth certificate."));
 
       http.end();
 
@@ -349,7 +360,7 @@ void oauth_poll(const char *device_code, const char *user_code, int expires, con
 
     String raw_json = http.getString();
 
-    Serial.print("Auth Response = ");
+    Serial.print("[Google Auth Handshake Verify] Auth Response = ");
     Serial.println(raw_json);
 
     DynamicJsonDocument doc(2048);
@@ -363,17 +374,17 @@ void oauth_poll(const char *device_code, const char *user_code, int expires, con
     const char *token_type = doc["token_type"];
     const char *id_token = doc["id_token"];
 
-    Serial.print("Access token = ");
+    Serial.print("[Google Auth Handshake Verify] Access token = ");
     Serial.println(access_token);
-    Serial.print("Expires in = ");
+    Serial.print("[Google Auth Handshake Verify] Expires in = ");
     Serial.println(expires_in);
-    Serial.print("Refresh token = ");
+    Serial.print("[Google Auth Handshake Verify] Refresh token = ");
     Serial.println(refresh_token);
-    Serial.print("Scope = ");
+    Serial.print("[Google Auth Handshake Verify] Scope = ");
     Serial.println(scope);
-    Serial.print("Token Type = ");
+    Serial.print("[Google Auth Handshake Verify] Token Type = ");
     Serial.println(token_type);
-    Serial.print("ID token = ");
+    Serial.print("[Google Auth Handshake Verify] ID token = ");
     Serial.println(id_token);
 
     lcd.clear();
@@ -396,7 +407,15 @@ void setup() {
   lcd.createChar(7, customBackslash);
 
   Serial.begin(9600);
-  Serial.println("Init debug port");
+  
+  Serial.println(F(
+    "\n\nInit debug port\n\n"
+    "  ___ ___ ___ _______    ___      _             _          \n"
+    " | __/ __| _ \__ /_  )  / __|__ _| |___ _ _  __| |__ _ _ _ \n"
+    " | _|\__ \  _/|_ \/ /  | (__/ _` | / -_) ' \/ _` / _` | '_|\n"
+    " |___|___/_| |___/___|  \___\__,_|_\___|_||_\__,_\__,_|_|  \n"
+    "\nMade by Mateo Rodriguez in 2023\n\n"                                                       
+    ));
 
   lcd.backlight();
 
@@ -413,6 +432,7 @@ void setup() {
   lcd.print("Online with IP:");
   lcd.setCursor(0, 1);
   lcd.print(WiFi.localIP());
+  Serial.print("[Setup] Online with IP: ");
   Serial.println(WiFi.localIP());
   lcd.display();
 
@@ -423,7 +443,9 @@ void setup() {
   char verify_url[41];
   int expires_in;
 
+  Serial.println("[Setup] Starting Auth Flow with Google Servers");
   oauth_login(device_code, user_code, &expires_in, verify_url);
+  Serial.println("[Setup] Confirming Auth Flow with Google Servers");
   oauth_poll(device_code, user_code, expires_in, verify_url);
 
   while (1) {}
