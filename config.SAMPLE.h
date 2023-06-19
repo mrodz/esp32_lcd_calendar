@@ -18,6 +18,8 @@ Enjoy!
 #ifndef __ESP32_CALENDAR_CREDENTIALS_H
 #define __ESP32_CALENDAR_CREDENTIALS_H
 
+// #define SPEEDY                            // Un-comment this line to get faster test builds (skip some trivial dialogue)
+
 /* START Wifi Config */
 #define WIFI_SSID "<YOUR WIFI SSID>"         // your network name
 #define WIFI_PASSWORD "<YOUR WIFI PASSWORD>" // your wifi password

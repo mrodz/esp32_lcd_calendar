@@ -83,7 +83,7 @@ void connect_to_wifi() {
 }
 
 const char GOOGLE_AUTH_SERVER[] = "https://oauth2.googleapis.com/device/code";
-const char OAUTH_INIT_ENDPOINT_BODY[] = "client_id="CLIENT_ID"&scope=email%20profile%20https://www.googleapis.com/auth/calendar.readonly";
+const char OAUTH_INIT_ENDPOINT_BODY[] = "client_id=" CLIENT_ID "&scope=email%20profile%20https://www.googleapis.com/auth/calendar.readonly";
 
 
 // this is the root certificate of the google authentication server.
@@ -157,6 +157,8 @@ restart:
       connect_to_wifi();
 
       Serial.print("[INIT Google Auth Handshake] Back online, restarting polling...");
+
+      http.end();
 
       goto restart;
     } else if (responseCode < 0) {
@@ -240,7 +242,7 @@ restart:
 #define MAX_ACCESS_TOKEN_LEN 2050  // 2048 per docs, + 2 for null byte and rounding
 #define MAX_REFRESH_TOKEN_LEN 520  // 512 per docs, + 8 for null byte and rounding
 
-const char GOOGLE_POLL_SERVER[] = "https://oauth2.googleapis.com/token";
+#define GOOGLE_POLL_SERVER "https://oauth2.googleapis.com/token"
 
 bool checked_snprintf(char *str, size_t size, const char *format, ...) {
   va_list args;
@@ -345,6 +347,8 @@ restart:
       connect_to_wifi();
 
       Serial.println("[Google Auth Handshake Verify] Back online, restarting polling...");
+
+      http.end();
 
       goto restart;
     } else if (responseCode < 0) {
@@ -543,6 +547,7 @@ void setup() {
   Serial.print("[Setup] The local time is: ");
   Serial.println(rfc3339_buffer);
 
+#ifndef SPEEDY
   lcd.clear();
   lcd.noDisplay();
 
@@ -557,6 +562,7 @@ void setup() {
   lcd.display();
 
   delay(4000);
+#endif  //SPEEDY
 
   char device_code[128];
   char user_code[16];
@@ -566,35 +572,241 @@ void setup() {
   Serial.println("[Setup] Starting Auth Flow with Google Servers");
   oauth_login(device_code, user_code, &expires_in, verify_url);
 
-  // AuthResponse auth_response = AuthResponse();
-
   Serial.println("[Setup] Confirming Auth Flow with Google Servers");
 
   oauth_poll(device_code, user_code, expires_in, verify_url);
 
-  // OAuth2AccessToken google_api_access_token(access_token, refresh_token, auth_token_expires_in);
-
-  // Serial.println(google_api_access_token);
-
+#ifndef SPEEDY
   lcd.clear();
   lcd.home();
   lcd.print("Done with setup");
 
   delay(4000);
+#endif  // SPEEDY
 }
+
+#define UPDATE_AUTH_TOKEN_BODY "client_id=" CLIENT_ID "&client_secret=" CLIENT_SECRET "&grant_type=refresh_token&refresh_token="
+
+void update_auth_token() {
+restart:
+  Serial.println("[POST Google Auth Key Update] Refreshing access token...");
+
+  if (WiFi.status() == WL_CONNECTED) {
+    WiFiClientSecure client;
+    client.setCACert(CA_CERT_GOOGLE_AUTH_SERVER);
+
+    HTTPClient http;
+
+    auto begin_code = http.begin(client, GOOGLE_POLL_SERVER);
+    Serial.print("[POST Google Auth Key Update] Begin code = ");
+    Serial.println(begin_code);
+
+    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+
+    auto body = String(UPDATE_AUTH_TOKEN_BODY) + refresh_token;
+    // char body[sizeof(UPDATE_AUTH_TOKEN_BODY) + MAX_REFRESH_TOKEN_LEN];
+    // strcpy(body, UPDATE_AUTH_TOKEN_BODY);
+    // strcpy(body + sizeof(UPDATE_AUTH_TOKEN_BODY) - 1, refresh_token);
+
+    Serial.print("[POST Google Auth Key Update] Will POST with parameters: ");
+
+    Serial.println(body.c_str());
+
+    // Serial.print("[POST Google Auth Key Update] Body len: ");
+    // size_t body_len = strlen(body);
+    // Serial.println(body_len);
+
+    int responseCode = http.POST(body);
+    Serial.print("[POST Google Auth Key Update] HTTP Response code = ");
+
+    if (WiFi.status() != WL_CONNECTED) {
+      lcd.setCursor(0, 0);
+      lcd.print("Lost signal");
+      lcd.setCursor(0, 1);
+      lcd.print("Reconnecting...");
+      delay(2000);
+
+      Serial.print("[POST Google Auth Key Update] Lost signal, restarting polling...");
+
+      connect_to_wifi();
+
+      Serial.print("[POST Google Auth Key Update] Back online, restarting polling...");
+
+      http.end();
+
+      goto restart;
+    } else if (responseCode < 0) {
+      Serial.printf("NET_ERR\n[HTTPS] GET... failed, error: %s. WILL RETRY\n", http.errorToString(responseCode).c_str());
+
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print(F("Auth failed #"));
+      lcd.print(responseCode);
+
+      lcd.setCursor(0, 1);
+      lcd.print(F("Retrying..."));
+
+      http.end();
+
+      goto restart;
+    }
+
+    Serial.println(responseCode);
+
+    String raw_json = http.getString();
+
+    Serial.print("[POST Google Auth Key Update] Poll returned: ");
+    Serial.println(raw_json);
+
+    if (responseCode != 200) {
+      Serial.printf("[HTTPS] GET... failed, error: %s\n", http.errorToString(responseCode).c_str());
+
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print(F("Auth failed #"));
+      lcd.print(responseCode);
+
+      lcd.setCursor(0, 1);
+      lcd.print(F("See serial port"));
+
+      Serial.println(F("[GET Google Calendar API] This error renders the Calendar API inaccessible. Try updating the auth certificate."));
+
+      http.end();
+
+      // hang
+      while (1) {}
+    }
+
+    DynamicJsonDocument doc(2048);
+
+    deserializeJson(doc, raw_json);
+
+    const char *access_token_src = doc["access_token"];
+    int expires_in_src = doc["expires_in"];
+
+    strcpy(access_token, access_token_src);
+    auth_token_expires_in = expires_in_src;
+
+  } else {
+    Serial.println("[POST Google Auth Key Update] Disconnected");
+
+    connect_to_wifi();
+
+    goto restart;
+  }
+}
+
+#define GOOGLE_TOKEN_INFO_ENDPOINT "https://www.googleapis.com/oauth2/v1/tokeninfo?access_token="
+
+#define MOCK_NEEDS_AUTH_TOKEN 0
+
+#if MOCK_NEEDS_AUTH_TOKEN
+bool app_needs_new_auth_token() {
+  Serial.println("[GET Google Auth Key Status*] Mocking \"true\"");
+  return true;
+}
+#else
+bool app_needs_new_auth_token() {
+restart:
+  Serial.println("[GET Google Auth Key Status] Polling validity...");
+  if (WiFi.status() == WL_CONNECTED) {
+    WiFiClientSecure client;
+    client.setCACert(CA_CERT_GOOGLE_AUTH_SERVER);
+
+    HTTPClient http;
+
+    char domain[MAX_ACCESS_TOKEN_LEN + sizeof(GOOGLE_TOKEN_INFO_ENDPOINT)];
+    strcpy(domain, GOOGLE_TOKEN_INFO_ENDPOINT);
+    strcpy(domain + sizeof(GOOGLE_TOKEN_INFO_ENDPOINT) - 1, access_token);
+
+    auto begin_code = http.begin(client, domain);
+    Serial.print("[GET Google Auth Key Status] Begin code = ");
+    Serial.println(begin_code);
+
+    http.addHeader("Accept", "application/json");
+
+    int responseCode = http.GET();
+    Serial.print("[GET Google Auth Key Status] HTTP Response code = ");
+
+    if (WiFi.status() != WL_CONNECTED) {
+      lcd.setCursor(0, 0);
+      lcd.print("Lost signal");
+      lcd.setCursor(0, 1);
+      lcd.print("Reconnecting...");
+      delay(2000);
+
+      Serial.print("[GET Google Auth Key Status] Lost signal, restarting polling...");
+
+      connect_to_wifi();
+
+      Serial.print("[GET Google Auth Key Status] Back online, restarting polling...");
+
+      http.end();
+
+      goto restart;
+    } else if (responseCode < 0) {
+      Serial.printf("NET_ERR\n[HTTPS] GET... failed, error: %s. WILL RETRY\n", http.errorToString(responseCode).c_str());
+
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print(F("Auth failed #"));
+      lcd.print(responseCode);
+
+      lcd.setCursor(0, 1);
+      lcd.print(F("Retrying..."));
+
+      http.end();
+
+      goto restart;
+    }
+
+    Serial.println(responseCode);
+
+    String raw_json = http.getString();
+
+    Serial.print("[GET Google Auth Key Status] Poll returned: ");
+    Serial.println(raw_json);
+
+    http.end();
+
+    if (responseCode != 200) {
+      Serial.print("[GET Google Auth Key Status] Got an HTTP error status ");
+      Serial.println(responseCode);
+
+      Serial.println("[GET Google Auth Key Status] Assuming this error means we need a new access token.");
+
+      return true;
+    }
+
+    Serial.println("[GET Google Auth Key Status] We got status code 200, which means the key is still valid");
+
+    return false;
+  } else {
+    Serial.println("[GET Google Auth Key Status] Disconnected");
+
+    connect_to_wifi();
+
+    goto restart;
+  }
+}
+#endif  // app_needs_new_auth_token()
 
 int counter = 1;
 
 // +1 space for null byte
 #define MAX_UI_DISPLAY_FOR_EVENT_NAME 33
 
-#define GOOGLE_CALDENDAR_API "https://www.googleapis.com/calendar/v3/calendars/primary/events?maxResults=1&orderBy=startTime&singleEvents=true&fields=items%2Fsummary%2Citems%2Fstart%2FdateTime%2Citems%2Fend%2FdateTime&key="CALENDAR_API_KEY"&timeMin="
+#define GOOGLE_CALDENDAR_API "https://www.googleapis.com/calendar/v3/calendars/primary/events?maxResults=1&orderBy=startTime&singleEvents=true&fields=items%2Fsummary%2Citems%2Fstart%2FdateTime%2Citems%2Fend%2FdateTime&key=" CALENDAR_API_KEY "&timeMin="
 
 void get_next_calendar_event(char event_name[MAX_UI_DISPLAY_FOR_EVENT_NAME], char start_date[RFC3339_STRING_BUF_LEN], char end_date[RFC3339_STRING_BUF_LEN]) {
 restart:
   lcd.clear();
   lcd.home();
   lcd.print("Refreshing...");
+
+  Serial.print("[GET Google Calendar API] Refreshing calendar... (Auth key is valid for ");
+  Serial.print(auth_token_seconds_to_expiration());
+  Serial.println(" more seconds)");
 
   if (WiFi.status() == WL_CONNECTED) {
     WiFiClientSecure client;
@@ -615,7 +827,7 @@ restart:
       Serial.println("[GET Google Calendar API] Could not format date");
 
       // hang
-      while (1) {}      
+      while (1) {}
     }
 
     char domain[sizeof(GOOGLE_CALDENDAR_API) + sizeof(time_min_buffer)];
@@ -639,7 +851,7 @@ restart:
 
     http.addHeader("Accept", "application/json");
     http.addHeader("Authorization", authorization_buffer);
-    
+
     int responseCode = http.GET();
     Serial.print("[GET Google Calendar API] HTTP Response code = ");
 
@@ -655,6 +867,8 @@ restart:
       connect_to_wifi();
 
       Serial.print("[GET Google Calendar API] Back online, restarting polling...");
+
+      http.end();
 
       goto restart;
     } else if (responseCode < 0) {
@@ -673,17 +887,15 @@ restart:
       goto restart;
     }
 
-    // Handle expired token (use refresh_token)
-    if (responseCode == 400 && auth_token_seconds_to_expiration() == 0) {
-
-      // unimplemented!
-      while (1) {}
-
-      goto restart;
-    }
-
     Serial.println(responseCode);
-    if (responseCode != 200 && responseCode != 301) {
+
+    if (responseCode != 200) {
+      if (app_needs_new_auth_token()) {
+        http.end();
+        update_auth_token();
+        goto restart;
+      }
+
       Serial.printf("[HTTPS] GET... failed, error: %s\n", http.errorToString(responseCode).c_str());
 
       Serial.print(http.getString());
@@ -704,21 +916,35 @@ restart:
       while (1) {}
     }
 
-
     String raw_json = http.getString();
 
     Serial.print("[GET Google Calendar API] Auth Response (JSON) = ");
     Serial.println(raw_json);
 
-    http.end();
+
+
 
     // die for now... work on this tomorrow!
-    while (1) {}
-    // DynamicJsonDocument doc(2048);
+    // while (1) {}
+    DynamicJsonDocument doc(2048);
 
-    // deserializeJson(doc, raw_json);
+    deserializeJson(doc, raw_json);
+
+    const char *name = doc["items"][0]["summary"];
+    const char *start_time = doc["items"][0]["start"]["dateTime"];
+    const char *end_time = doc["items"][0]["end"]["dateTime"];
+
+    Serial.print("[GET Google Calendar API] name = ");
+    Serial.println(name);
+
+    Serial.print("[GET Google Calendar API] start_time = ");
+    Serial.println(start_time);
+
+    Serial.print("[GET Google Calendar API] end_time = ");
+    Serial.println(end_time);
 
     http.end();
+
   } else {
     Serial.println("[INIT Google Auth Handshake] Disconnected");
 
@@ -726,7 +952,6 @@ restart:
 
     goto restart;
   }
-
 }
 
 void loop() {
