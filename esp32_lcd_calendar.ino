@@ -6,7 +6,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
-
+#include <WiFi.h>
 #include "config.h"
 
 const char *ssid = WIFI_SSID;
@@ -23,9 +23,7 @@ byte customBackslash[8] = {
   0b00000
 };
 
-// The display is 16 chars long. However, we allow a buffer of 64
-// characters so that writing does not wrap.
-LiquidCrystal_I2C lcd(0x27, 64, 2);  // set the LCD address to 0x27 for a 64 chars and 2 line display
+LiquidCrystal_I2C lcd(0x27, 16, 2);  // set the LCD address to 0x27 for a 64 chars and 2 line display
 
 int show = 0;
 
@@ -284,14 +282,15 @@ restart:
 
   // max message len = 12
   const char *messages[] = {
-    "To sync your",
-    "Google Accou",
-    "nt, enter th",
-    "is code at: ",
-    connection_url  // except for the last entry, which can be 16
+    // "To sync your",
+    // "Google Accou",
+    // "nt, enter th",
+    // "is code at: ",
+    connection_url,  // except for the last entry, which can be 16
+    "Please visit url"
   };
 
-  int message_len = 5;
+  int message_len = 2;
   int message_idx = 0;
 
   WiFiClientSecure client;
@@ -299,20 +298,22 @@ restart:
 
   while (1) {
     unsigned long secondsNow = millis() / 1000;
-    unsigned long timeLeft = secondsWillExpire - secondsNow;
+    
+    // ternary because it's unsigned
+    unsigned long timeLeft = secondsWillExpire >= secondsNow ? 0 : secondsWillExpire - secondsNow;
 
     lcd.setCursor(0, 0);
     lcd.print("                ");
 
     lcd.setCursor(0, 0);
-
+#ifdef DISPLAY_STEP_NUMBER
     if (message_idx != message_len - 1) {
       lcd.print(message_idx + 1);
       lcd.print("/");
       lcd.print(message_len);
       lcd.print(" ");
     }
-
+#endif
     lcd.print(messages[message_idx++]);
     message_idx %= message_len;
 
@@ -363,7 +364,7 @@ restart:
       goto restart;
     }
 
-    if (responseCode == 400 && timeLeft <= 0) {
+    if (responseCode == 400 && timeLeft <= 16) {
       lcd.clear();
       lcd.home();
       lcd.print("Code expired!");
@@ -715,9 +716,11 @@ restart:
 
     HTTPClient http;
 
-    char domain[MAX_ACCESS_TOKEN_LEN + sizeof(GOOGLE_TOKEN_INFO_ENDPOINT)];
-    strcpy(domain, GOOGLE_TOKEN_INFO_ENDPOINT);
-    strcpy(domain + sizeof(GOOGLE_TOKEN_INFO_ENDPOINT) - 1, access_token);
+    String domain = String(GOOGLE_TOKEN_INFO_ENDPOINT) + access_token;
+
+    // char domain[MAX_ACCESS_TOKEN_LEN + sizeof(GOOGLE_TOKEN_INFO_ENDPOINT)];
+    // strcpy(domain, GOOGLE_TOKEN_INFO_ENDPOINT);
+    // strcpy(domain + sizeof(GOOGLE_TOKEN_INFO_ENDPOINT) - 1, access_token);
 
     auto begin_code = http.begin(client, domain);
     Serial.print("[GET Google Auth Key Status] Begin code = ");
@@ -798,7 +801,7 @@ int counter = 1;
 
 #define GOOGLE_CALDENDAR_API "https://www.googleapis.com/calendar/v3/calendars/primary/events?maxResults=1&orderBy=startTime&singleEvents=true&fields=items%2Fsummary%2Citems%2Fstart%2FdateTime%2Citems%2Fend%2FdateTime&key=" CALENDAR_API_KEY "&timeMin="
 
-void get_next_calendar_event(char event_name[MAX_UI_DISPLAY_FOR_EVENT_NAME], char start_date[RFC3339_STRING_BUF_LEN], char end_date[RFC3339_STRING_BUF_LEN]) {
+void get_next_calendar_event(char event_name_dst[MAX_UI_DISPLAY_FOR_EVENT_NAME], char start_date_dst[RFC3339_STRING_BUF_LEN], char end_date_dst[RFC3339_STRING_BUF_LEN]) {
 restart:
   lcd.clear();
   lcd.home();
@@ -921,11 +924,6 @@ restart:
     Serial.print("[GET Google Calendar API] Auth Response (JSON) = ");
     Serial.println(raw_json);
 
-
-
-
-    // die for now... work on this tomorrow!
-    // while (1) {}
     DynamicJsonDocument doc(2048);
 
     deserializeJson(doc, raw_json);
@@ -942,6 +940,12 @@ restart:
 
     Serial.print("[GET Google Calendar API] end_time = ");
     Serial.println(end_time);
+
+    strncpy(event_name_dst, name, MAX_UI_DISPLAY_FOR_EVENT_NAME);
+    event_name_dst[MAX_UI_DISPLAY_FOR_EVENT_NAME - 1] = '\0';
+
+    strncpy(start_date_dst, start_time, RFC3339_STRING_BUF_LEN);
+    strncpy(end_date_dst, end_time, RFC3339_STRING_BUF_LEN);
 
     http.end();
 
@@ -971,23 +975,44 @@ void loop() {
     lcd.print("Back online!");
     delay(2000);
     lcd.clear();
+    lcd.home();
   }
 
   // useAccessToken();
-
-  lcd.print("GET calendar");
-  lcd.setCursor(0, 1);
-  lcd.print(counter++);
-
-  // Serial.println(access_token);
-  // Serial.println(refresh_token);
-  // Serial.println(auth_token_expires_in);
-
   char event_name[MAX_UI_DISPLAY_FOR_EVENT_NAME];
   char start_date[RFC3339_STRING_BUF_LEN];
   char end_date[RFC3339_STRING_BUF_LEN];
 
   get_next_calendar_event(event_name, start_date, end_date);
 
-  delay(10000);
+  lcd.clear();
+  lcd.home();
+
+  for (int i = 1; i <= 10; i++) {
+    lcd.print("Next Event:");
+    delay(3000);
+    lcd.clear();
+    lcd.home();
+
+    lcd.print(event_name);
+    lcd.setCursor(0, 1);
+    lcd.print(event_name + 16);
+    delay(7000);
+    lcd.clear();
+    lcd.home();
+
+    lcd.print("Starts At:");
+    lcd.setCursor(0, 1);
+    lcd.print(start_date);
+    delay(7000);
+    lcd.clear();
+    lcd.home();
+
+    lcd.print("Ends At:");
+    lcd.setCursor(0, 1);
+    lcd.print(end_date);
+    delay(7000);
+    lcd.clear();
+    lcd.home();
+  }
 }
